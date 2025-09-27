@@ -1,6 +1,9 @@
 import os
 import streamlit as st
 from dotenv import load_dotenv
+import google.genai
+
+
 
 # LangChain imports
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -155,3 +158,4 @@ if prompt:
 
     except Exception as e:
         st.error(f"❌ Error: {str(e)}")
+print(google.genai.__version__)
