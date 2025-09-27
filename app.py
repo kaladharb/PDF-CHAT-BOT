@@ -1,13 +1,25 @@
 import os
 import streamlit as st
+from dotenv import load_dotenv
 
+# LangChain imports
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.chains import RetrievalQA
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
-from langchain_groq import ChatGroq
 from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+# Gemini imports
+import google.genai as genai
+from langchain.llms.base import LLM
+from pydantic import Field, BaseModel
+
+# ------------------------
+# Load environment variables
+# ------------------------
+load_dotenv()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # ------------------------
 # Paths
@@ -47,6 +59,28 @@ def get_vectorstore():
 
 def set_custom_prompt(template):
     return PromptTemplate(template=template, input_variables=["context", "question"])
+
+# ------------------------
+# Gemini LLM Wrapper (fixed for Pydantic)
+# ------------------------
+class GeminiLLM(LLM, BaseModel):
+    client: genai.Client = Field(exclude=True)  # Exclude from Pydantic validation
+    model: str = "gemini-2.5-flash"
+
+    @property
+    def _llm_type(self) -> str:
+        return "gemini"
+
+    def _call(self, prompt: str, stop=None) -> str:
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=prompt
+        )
+        return response.text
+
+# Initialize Gemini client
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+gemini_llm = GeminiLLM(client=gemini_client)
 
 # ------------------------
 # Streamlit Layout
@@ -96,12 +130,9 @@ if prompt:
         if vectorstore is None:
             st.error("❌ Failed to load vector store")
 
+        # Use Gemini LLM here
         qa_chain = RetrievalQA.from_chain_type(
-            llm=ChatGroq(
-                model_name="meta-llama/llama-4-maverick-17b-128e-instruct",
-                temperature=0.0,
-                groq_api_key=st.secrets["GROQ_API_KEY"],
-            ),
+            llm=gemini_llm,
             chain_type="stuff",
             retriever=vectorstore.as_retriever(search_kwargs={'k': 3}),
             return_source_documents=True,
