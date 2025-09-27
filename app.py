@@ -45,12 +45,12 @@ def get_vectorstore():
     if os.path.exists(index_path):
         db = FAISS.load_local(DB_FAISS_PATH, embedding_model, allow_dangerous_deserialization=True)
     else:
-        st.info("🚀 Building FAISS vectorstore from PDFs...")
+        # st.info("🚀 Building FAISS vectorstore from PDFs...")
         documents = load_pdf_files(DATA_PATH)
         chunks = create_chunks(documents)
         db = FAISS.from_documents(chunks, embedding_model)
         db.save_local(DB_FAISS_PATH)
-        st.success("✅ FAISS vectorstore built and saved")
+        # st.success("✅ FAISS vectorstore built and saved")
     return db
 
 def set_custom_prompt(custom_prompt_template):
@@ -60,7 +60,7 @@ def set_custom_prompt(custom_prompt_template):
 # Streamlit App
 # ------------------------
 
-st.title("Ask Chatbot!")
+st.title("Ask AI Health Assistant!!")
 
 if 'messages' not in st.session_state:
     st.session_state.messages = []
