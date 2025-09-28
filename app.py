@@ -1,123 +1,165 @@
 import os
+import shutil
 import streamlit as st
-
+from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain.chains import RetrievalQA
-
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
 from langchain_groq import ChatGroq
+from langchain.chains import RetrievalQA
 
-from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+# --- Configuration ---
+st.set_page_config(page_title="DocuBot AI 🤖", page_icon="🤖", layout="wide")
 
-# Paths
+# Define paths
 DATA_PATH = "data/"
 DB_FAISS_PATH = "vectorstore/db_faiss"
 
-# Ensure vectorstore folder exists
-os.makedirs(DB_FAISS_PATH, exist_ok=True)
+# --- Helper Functions ---
+def clear_vector_store():
+    """Clears the existing vector store and data directory."""
+    if os.path.exists(DB_FAISS_PATH):
+        shutil.rmtree(DB_FAISS_PATH)
+    if os.path.exists(DATA_PATH):
+        shutil.rmtree(DATA_PATH)
+    os.makedirs(DATA_PATH, exist_ok=True)
+    st.toast("🧹 Cleared old data and vector store!", icon="✨")
 
-# ------------------------
-# Helper functions
-# ------------------------
+def save_uploaded_files(uploaded_files):
+    """Saves uploaded files to the data directory."""
+    if not os.path.exists(DATA_PATH):
+        os.makedirs(DATA_PATH)
+    for file in uploaded_files:
+        with open(os.path.join(DATA_PATH, file.name), "wb") as f:
+            f.write(file.getbuffer())
 
-def load_pdf_files(data_path):
-    loader = DirectoryLoader(data_path, glob="*.pdf", loader_cls=PyPDFLoader)
+def build_vector_store():
+    """Builds the FAISS vector store from PDF documents."""
+    loader = DirectoryLoader(DATA_PATH, glob="*.pdf", loader_cls=PyPDFLoader)
     documents = loader.load()
-    return documents
+    if not documents:
+        st.warning("No PDF documents found. Please upload at least one PDF.")
+        return
 
-def create_chunks(documents):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    return text_splitter.split_documents(documents)
+    chunks = text_splitter.split_documents(documents)
 
-def get_embedding_model():
-    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    embedding_model = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={'device': 'cpu'}
+    )
 
-@st.cache_resource
-def get_vectorstore():
-    """
-    Loads FAISS if exists; otherwise builds it from PDFs.
-    """
-    embedding_model = get_embedding_model()
-    index_path = os.path.join(DB_FAISS_PATH, "index.faiss")
-
-    if os.path.exists(index_path):
-        db = FAISS.load_local(DB_FAISS_PATH, embedding_model, allow_dangerous_deserialization=True)
-    else:
-        # st.info("🚀 Building FAISS vectorstore from PDFs...")
-        documents = load_pdf_files(DATA_PATH)
-        chunks = create_chunks(documents)
-        db = FAISS.from_documents(chunks, embedding_model)
-        db.save_local(DB_FAISS_PATH)
-        # st.success("✅ FAISS vectorstore built and saved")
+    db = FAISS.from_documents(chunks, embedding_model)
+    db.save_local(DB_FAISS_PATH)
     return db
 
-def set_custom_prompt(custom_prompt_template):
-    return PromptTemplate(template=custom_prompt_template, input_variables=["context", "question"])
-
-# ------------------------
-# Streamlit App
-# ------------------------
-
-st.title("Ask AI Health Assistant!")
-
-if 'messages' not in st.session_state:
-    st.session_state.messages = []
-
-# Display past messages
-for message in st.session_state.messages:
-    st.chat_message(message['role']).markdown(message['content'])
-
-prompt = st.chat_input("Pass your prompt here")
-
-if prompt:
-    st.chat_message('user').markdown(prompt)
-    st.session_state.messages.append({'role': 'user', 'content': prompt})
+def get_qa_chain():
+    """Creates and returns the RetrievalQA chain."""
+    embedding_model = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={'device': 'cpu'}
+    )
+    db = FAISS.load_local(DB_FAISS_PATH, embedding_model, allow_dangerous_deserialization=True)
 
     CUSTOM_PROMPT_TEMPLATE = """
-    Use the pieces of information provided in the context to answer user's question.
-    If you don't know the answer, just say that you don't know, don't try to make up an answer.
-    Don't provide anything out of the given context.
+    Use the following pieces of context to answer the question at the end.
+    If you don't know the answer from the context, just say that you don't know, don't try to make up an answer.
+    Provide a concise and direct answer.
 
     Context: {context}
     Question: {question}
 
-    Start the answer directly. No small talk please.
-    """
+    Helpful Answer:"""
 
-    try:
-        vectorstore = get_vectorstore()
-        if vectorstore is None:
-            st.error("❌ Failed to load the vector store")
+    prompt = PromptTemplate(
+        template=CUSTOM_PROMPT_TEMPLATE, input_variables=["context", "question"]
+    )
 
-        qa_chain = RetrievalQA.from_chain_type(
-            llm=ChatGroq(
-                model_name="meta-llama/llama-4-maverick-17b-128e-instruct",
-                temperature=0.0,
-                groq_api_key=st.secrets["GROQ_API_KEY"],
-            ),
-            chain_type="stuff",
-            retriever=vectorstore.as_retriever(search_kwargs={'k': 3}),
-            return_source_documents=True,
-            chain_type_kwargs={'prompt': set_custom_prompt(CUSTOM_PROMPT_TEMPLATE)}
-        )
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=ChatGroq(
+            model_name="llama-3.1-8b-instant",
+            temperature=0.0,
+            groq_api_key=st.secrets["GROQ_API_KEY"],
+        ),
+        chain_type="stuff",
+        retriever=db.as_retriever(search_kwargs={'k': 3}),
+        return_source_documents=True,
+        chain_type_kwargs={'prompt': prompt}
+    )
+    return qa_chain
 
-        response = qa_chain.invoke({'query': prompt})
+# --- Streamlit UI ---
+with st.sidebar:
+    st.title("📄 DocuBot Controls")
+    st.markdown("Upload your PDF documents and click 'Process' to get started.")
 
-        result = response["result"]
-        source_documents = response["source_documents"]
+    uploaded_files = st.file_uploader(
+        "Upload your PDFs",
+        type=["pdf"],
+        accept_multiple_files=True,
+        help="Upload one or more PDF files."
+    )
 
-        # Show answer
-        st.chat_message('assistant').markdown(result)
+    if st.button("Process Documents", use_container_width=True):
+        if uploaded_files:
+            with st.spinner("Processing documents... This may take a moment."):
+                clear_vector_store()
+                save_uploaded_files(uploaded_files)
+                build_vector_store()
+                st.session_state.is_processed = True
+                st.success("✅ Documents processed and ready!")
+                st.toast("You can now ask questions about your documents.", icon="🎉")
+        else:
+            st.warning("Please upload at least one PDF file.")
 
-        # Expandable sources
-        with st.expander("Show Sources"):
-            for i, doc in enumerate(source_documents, 1):
-                st.markdown(f"**Source {i}** - Page {doc.metadata.get('page', 'N/A')}")
-                st.markdown(doc.page_content)
+    st.markdown("---")
+    if st.button("🗑️ Clear Chat History", use_container_width=True):
+        st.session_state.messages = []
+        st.toast("Chat history cleared!", icon="🧹")
 
-        st.session_state.messages.append({'role': 'assistant', 'content': result})
+# --- Main Chat ---
+st.title("🤖 DocuBot AI: Chat with Your PDFs")
+st.markdown("Ask any question about the content of your uploaded documents.")
 
-    except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+if 'is_processed' not in st.session_state:
+    st.session_state.is_processed = os.path.exists(DB_FAISS_PATH)
+
+if not st.session_state.messages:
+    st.info("Upload your PDFs and click 'Process Documents' to begin the conversation.")
+
+# Display previous chat messages
+for message in st.session_state.messages:
+    with st.chat_message(message['role']):
+        st.markdown(message['content'])
+
+# Handle user input
+if prompt := st.chat_input("Ask a question about your documents..."):
+    st.chat_message('user').markdown(prompt)
+    st.session_state.messages.append({'role': 'user', 'content': prompt})
+
+    if not st.session_state.is_processed:
+        st.warning("Please upload and process your documents before asking questions.")
+    else:
+        try:
+            with st.spinner("Thinking..."):
+                qa_chain = get_qa_chain()
+                response = qa_chain.invoke({'query': prompt})
+                result = response["result"]
+                source_documents = response["source_documents"]
+
+                with st.chat_message('assistant'):
+                    st.markdown(result)
+
+                    with st.expander("📚 Show Sources"):
+                        for i, doc in enumerate(source_documents, 1):
+                            st.markdown(f"**Source {i}** - Page: {doc.metadata.get('page', 'N/A')}")
+                            st.info(doc.page_content)
+
+                st.session_state.messages.append({'role': 'assistant', 'content': result})
+
+        except Exception as e:
+            st.error(f"⚠️ An error occurred: {str(e)}")
+            st.exception(e)
